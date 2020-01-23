@@ -1,0 +1,64 @@
+---
+title: "Movement Analysis in R Workshop Preparation & Installation Instructions"
+author: "Briana Abrahms"
+date: "September 10th 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Workshop Goals
+
+In this workshop we will cover a range of skills in R that will allow users to begin asking and answering ecological questions with movement data. Based on survey feedback, we will specifically cover calculating path statistics, extracting environmental covariates, data visualization and animation, and behavioral segmentation as time allows. We will be assuming our data are already cleaned and ready for analysis, therefore we will *not* be covering data cleaning, smoothing, or simulating, such as dealing with irregular Argos data. For using state space models to deal with irregular Argos data in particular, I refer you to the R packages 'bsam', 'crawl', and 'ctmm'.
+
+## Instructions before the workshop
+Before the workshop, please make sure you have installed:
+
+- [R (version 3.3.0 or higher)](https://www.r-project.org/)
+- [Rstudio](https://www.rstudio.com/products/rstudio/download/#download) 
+- The following packages:
+
+    - tidyverse
+    - lubridate
+    - sf
+    - ggplot2 
+    - mapview 
+    - adehabitatLT
+    - move
+    - raster
+    - knitr
+    - devtools
+    - gifski
+    - gganimate* 
+    - transformr*
+    - rerddap*
+    - rerddapXtracto*
+    - moveHMM
+    - bcpa
+    - rnaturalearth
+
+(*from Github - see details below)
+
+### Installation Instructions:
+Inside the Rstudio console, you can install packages using the function `install.packages()`.
+
+You can install packages one at a time using their name in quotes: `install.packages("raster")`
+
+OR 
+
+you can install multiple at one time using the `c()` function to combine all your names into one character vector:` install.packages(c("raster", "tidyverse", "sf"))`. 
+
+**Keep an eye out for errors that may mean one or multiple packages are failing to load.**
+
+* To install packages from Github, you will need to use the `devtools` package to download the most up to date versions.
+This is very similar to the base `install.packages()` function except we have to give it more specific path names. To install packages from Github, use:
+
+- `devtools:: install_github("thomasp85/gganimate")`
+- `devtools::install_github("thomasp85/transformr")`
+- `devtools::install_github("ropensci/rerddap")`
+- `devtools::install_github("rmendels/rerddapXtracto")`
+
+## Acknowledgements
+Much of the code I will cover in the workshop is adapted from other resources produced by the [#Rstats](https://twitter.com/search?q=%23rstats&src=typd) community at large. Effort is made to cite these resources throughout these materials but I would like to specifically acknowledge the contributions of Dana Seidel, Eric Dougherty, Wayne Getz, Kamram Safi, Roy Mendelssohn, Anne Hertel, Clement Calenge, and Hadley Wickham. 

@@ -1,0 +1,127 @@
+---
+title: "Visualizing and Animating Movement Data"
+output: html_document
+author: "Briana Abrahms"
+date: "September 10th 2019"
+---
+
+```{r libraries, message=FALSE}
+library(tidyverse)
+library(sf) #for simple feature spatial data
+library(mapview) #for interactive mapping
+#devtools::install_github("thomasp85/gganimate")
+#devtools::install_github("thomasp85/transformr")
+library(gganimate) #for animations
+library(transformr) #for animations
+library(knitr)
+library(raster)
+library(lubridate)
+library(rnaturalearth)
+library(gifski)
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, cache = TRUE)
+knitr::opts_knit$set(root.dir = '~/Dropbox/Research/R Tutorial Scripts & Workshops/Abrahms UW Movement Analysis Workshop/Workshop Materials/')
+```
+
+```{r movement data, message = FALSE}
+#load albatross data
+albatross_sf <- read_tsv("data_files/Study2911040", comment="##", col_types = "Tnncc") %>% # Tnncc = time, number, number, character, character
+  as.data.frame() %>%
+  na.omit()  %>% 
+  st_as_sf(coords = c("location_long", "location_lat"), crs=4326)
+
+#load zebra data
+zebra_sf <- read_csv("data_files/Zebra.csv") %>% 
+  dplyr::select(ID = Name, 4:6) %>% 
+  mutate(timestamp = as.POSIXct(lubridate::mdy_hm(Date))) %>%
+  st_as_sf(., coords = 3:4, crs = "+init=epsg:4326") %>% #longlat
+  st_transform("+init=epsg:32733") #convert to UTM
+```
+
+## Your typical ggplot
+Let's plot the albatross data.
+```{r ggplot, message=FALSE, warning=FALSE}
+# Create continental background
+earth <- st_as_sf(rnaturalearth::countries110)
+bbox <- st_bbox(albatross_sf, crs=st_crs(earth))
+area <- st_crop(earth, bbox)
+
+# Plot
+albatross_sf %>%
+  ggplot() + 
+  geom_sf(aes(colour = individual_id)) +
+  geom_sf(data = area, fill = 'gray') + 
+  labs(title = 'Albatross tracks') + 
+  theme_classic() +
+  theme(panel.background = element_rect(fill = 'lightblue')) 
+```
+
+
+## Interactive exploration
+We will use the `mapview` package to make an interactive plot.
+```{r mapview, message=FALSE}
+albatross_sf %>% 
+  mapview(zcol="individual_id")
+```
+
+## Let's animate!
+
+### Animation with static background. 
+We'll use the same area background as the static ggplot above but animate using the `gganimate` package.
+```{r animate static background, message=FALSE}
+anim_static <- albatross_sf %>%
+  mutate(date = as.Date(timestamp)) %>%
+  group_by(individual_id) %>%
+  filter(!duplicated(date)) %>% #run faster by subsetting to one fix per day per individual
+  ggplot() + 
+  geom_sf(aes(colour = individual_id), size = 3) +
+  geom_sf(data = area, fill = 'gray') + 
+  labs(title = 'Albatross tracks', subtitle = 'Date: {format(frame_time, "%b %e %Y")}') + 
+  theme_classic() +
+  theme(panel.background = element_rect(fill = 'lightblue')) + 
+  transition_time(date) + 
+  shadow_wake(wake_length = 0.3)
+
+movie_static <- gganimate::animate(anim_static, fps=5) # pause and contemplate the universe while this turns its cogs
+#' fps is the framerate of the animation in frames/sec.
+#' duration is the length of the animation in seconds.
+#' nframe is the total number of frames.
+#' detail is the number of additional frames to calculate, per frame.
+#' device is the device to use for rendering the single frames( i.e., `'png'`, `'jpeg'`, `'tiff'`, and `'bmp'`). Defaults to `'png'`.
+movie_static
+
+# To download as gif:
+# anim_save("albatross_static_background.gif", movie_static)
+```
+
+### Animation with dynamic background. 
+For this animation we'll overlap the 16-day NDVI layers with our zebra data in 2009.
+```{r animate dynamic background, message=FALSE}
+
+#Load NDVI data in long format (columns for lon, lat, date, and value). For convenience I have converted it ahead of time.
+NDVI_df <- read_csv("spatial_layers/NDVI_16day.csv") %>% #all of 2009
+  mutate(date=as.Date(date)) %>%
+  filter(date >= as.Date("2009-04-24") & date <= as.Date("2009-06-14")) %>% #reduce date range for speed
+  slice(which(row_number() %% 8 == 1)) #reduce spatial resolution for speed
+
+anim_dynamic <- zebra_sf %>%
+  mutate(date = as.Date(timestamp)) %>%
+  ggplot() + 
+  geom_raster(data = NDVI_df, aes(x = lon, y = lat, fill = value)) +
+  scale_fill_gradientn(name = "NDVI", colours=rev(terrain.colors(10))) +
+  geom_sf(aes(colour = ID), size = 2) +
+  labs(title = 'Zebra tracks', subtitle = 'Date: {format(frame_time, "%b %e %Y")}') + 
+  theme_classic() +
+  transition_time(date, range=c(as.Date("2009-04-28"), as.Date("2009-06-08"))) +
+  shadow_wake(wake_length = 0.1) + 
+  theme(legend.position="bottom")
+
+# Warning this is verrrrry slow
+movie_dynamic <- gganimate::animate(anim_dynamic, fps=5) 
+movie_dynamic
+
+# To download as gif:
+# anim_save("zebra_dynamic_background.gif", movie_dynamic)
+```

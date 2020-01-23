@@ -1,0 +1,222 @@
+---
+title: "Extracting Environmental Covariates for Movement Data"
+author: "Briana Abrahms"
+date: "September 10th 2019"
+output: html_document
+---
+
+```{r libraries, warnings=FALSE, message=FALSE}
+library(raster)
+library(sf)
+library(tidyverse)
+library(knitr)
+library(lubridate)
+#devtools::install_github("ropensci/rerddap")
+#devtools::install_github("rmendels/rerddapXtracto")
+library(rerddap)
+library(rerddapXtracto)
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, cache = TRUE)
+knitr::opts_knit$set(root.dir = '~/Dropbox/Research/R Tutorial Scripts & Workshops/Abrahms UW Movement Analysis Workshop/Workshop Materials/')
+```
+
+## Types of Spatial Data
+
+Spatial data comes in two forms:
+
+1. Vector data
+2. Raster data
+
+With important differences across classes. 
+
+### Vector Data
+Vector models are a representation of the world using points, lines, and
+polygons. This class is useful for storing data that has discrete boundaries,
+such as country borders, land parcels, and roads. Often, vector data is stored as "shapefiles" (.shp).
+
+### Raster Data
+Raster models are a representation of the world as a surface divided 
+into a regular grid of cells. Often, Rasters are stored as "GeoTIFFs" (.tif). .jpg, .png, and .gri/.grd are all other types of raster data files.
+
+## Extracting from Vector Data
+Let's look at a zebra dataset and a road layer in Etosha National Park, Namibia.
+```{r zebra data, message=F, warning=FALSE}
+zebra_sf <- read_csv("data_files/Zebra.csv") %>% 
+  dplyr::select(ID = Name, 4:6) %>% 
+  st_as_sf(., coords = 3:4, crs = "+init=epsg:4326") %>% #longlat
+  st_transform("+init=epsg:32733") %>% #convert to UTM
+  mutate(timestamp = as.POSIXct(lubridate::mdy_hm(Date)))
+
+roads <- st_read("spatial_layers/enp roads.shp", crs = "+init=epsg:4326") %>% 
+  st_transform("+init=epsg:32733")
+
+ggplot() +
+  geom_sf(data=roads) +
+  geom_sf(data=zebra_sf, aes(color=ID))
+```
+
+How close or far from different road types do zebra move?
+If we interogate our `roads` object a bit further, we see that there are several types of roads in the shapefile.
+```{r roads, message=F, warning=FALSE}
+head(roads)
+unique(roads$TYPE)
+
+large_roads <- filter(roads, TYPE %in% c("Tar", "Gravel"))
+small_roads <- filter(roads, TYPE %in% c("Graded", "Track"))
+ggplot() +
+  geom_sf(data=large_roads, size=1.5) + 
+  geom_sf(data=small_roads, size=0.6) + 
+  geom_sf(data=zebra_sf, aes(color=ID))
+
+# find the minimum distance (in meters) of each point to a large road
+large_dist<- st_distance(y=zebra_sf, x=large_roads) # a units matrix dim =[nrow(x), nrow(y)]; takes 10-20 seconds
+zebra_sf$large_road_dist <- apply(large_dist, 2, min)
+
+# find the minimum distance (in meters) of each point to a small road
+small_dist<- st_distance(y=zebra_sf, x=small_roads) # a units matrix dim =[nrow(x), nrow(y)]; takes 10-20 seconds
+zebra_sf$small_road_dist <- apply(small_dist, 2, min)
+
+head(data.frame(zebra_sf))
+
+ggplot(zebra_sf) +
+  geom_histogram(aes(large_road_dist, fill="large roads"), alpha=0.5) +
+  geom_histogram(aes(small_road_dist, fill="small roads"), alpha=0.5) +
+  scale_fill_manual(labels=c("large roads", "small roads"), values=c("blue", "orange"))
+```
+
+## Extracting from Raster Data
+For raster data, the `raster` package works wonders for everything from simple extraction to complex raster calculations. 
+
+### Extracting from a single raster layer
+Here we will extract the long-term average NDVI values 2000-2015 for each zebra location from a single raster layer.
+```{r NDVI rasterlayer, message=FALSE, warning=FALSE}
+NDVI_mean <- raster("spatial_layers/ndvi_mean_utm.tif") * 0.0001
+
+NDVI_mean
+
+NDVI_mean %>% 
+  rasterToPoints() %>%
+  data.frame() %>%
+  ggplot() + geom_raster(aes(x=x, y=y, fill=ndvi_mean_utm)) +
+  geom_sf(data=zebra_sf, size=0.7)
+
+zebra_sf$NDVI_mean <- raster::extract(NDVI_mean, as(zebra_sf, "Spatial"))
+
+head(data.frame(zebra_sf))
+
+ggplot(zebra_sf) +
+  geom_sf(aes(color=NDVI_mean)) + 
+  scale_color_gradientn(colors=rev(terrain.colors(10))) +
+  theme_bw()
+```
+
+### Time-matching and extracting from a rasterstack
+Many times we may have multiple raster layers within a single file, for example a layer for each day, month or year. In that case we load them as a `rasterstack` object and need to time-match them to extract the right value for the specific time of each data point. Here we will match zebra locations to 16-day NDVI layers. Please be advised the process of time-matching to rasters can take a long time.
+```{r NDVI rasterstack, message=FALSE, warning=FALSE}
+NDVI_stack <- stack("spatial_layers/modisV006_ndvi00_15_utm.tif")
+
+NDVI_stack
+
+# often we know the date ranges of each layer, but in this case we have to get them
+# from a reference file: these are named by year and yday
+NDVI_stack_names <- read_csv("spatial_layers/names_modisV006ndvi_00_15_utm.csv")
+year <- as.numeric(substr(NDVI_stack_names$x,5,8))
+yday <- as.numeric(substr(NDVI_stack_names$x,9,11))
+dates <- as.Date(yday, origin = paste(year,"01-01", sep="-"))
+
+#assign time value (in this case year) to each layer
+NDVI_stack <- setZ(NDVI_stack, dates)
+
+NDVI_stack #note the new 'time' variable
+
+#time match and extract
+stack_dates <- getZ(NDVI_stack) #all raster layer dates
+zebra_sf$NDVI <- NA
+for (i in 1:50) { #this would take a long time to run through nrow(zebra_sf) locations, so demonstrating for first 50 locations
+  print(paste0("extracting zebra location #",i))
+  zeb_date <- as.Date(zebra_sf$timestamp[i]) 
+  stack_idx <- which(stack_dates %in% seq(zeb_date - 15, zeb_date, by='day')) #which raster layer date matches zebra date
+  zebra_sf$NDVI[i] <-raster::extract(NDVI_stack[[stack_idx]], as(zebra_sf$geometry[i], "Spatial")) #extract
+}
+
+head(data.frame(zebra_sf))
+```
+
+### Time-matching and extracting with Xtractomatic
+A good resource for many environmental datasets, especially in the marine environment, are [NOAA's ERDDAP gridded datasets](https://upwell.pfeg.noaa.gov/erddap/griddap/index.html?page=1&itemsPerPage=1000), which has hundreds of variables from temperature to chlorophyll to wind, and others. There is a handy R package called [Xtractomatic](https://coastwatch.pfeg.noaa.gov/xtracto/) which downloads and time-matches data from this server directly. Note that you need an uninterrupted interrupted internet connection for this to work. Here we will use Xtractomatic to time-match locations for one albatross with 8-day chlorophyll values.
+```{r xtracto points, message=F, warning=FALSE}
+#Load albatross and subset to one individual for demonstration's sake
+albatross <- read_tsv("data_files/Study2911040", comment="##", col_types = "Tnncc") %>%
+  as.data.frame() %>%
+  na.omit()
+
+albatross1 <- albatross %>% filter(individual_id=="2911059")
+
+# The dataInfo call selects what dataset is chosen for the extraction  
+dataset <- 'erdMBchla8day_LonPM180' #8-day Aqua MODIS
+(dataInfo <- rerddap::info(dataset))
+
+# Depending on the dataset this may or may not have to be called.  Look at DataInfo to see if dataset has an altitude dimension. 
+# If it does, then the call to rxtracto must define zcoord, if it doesn't then the call should not give zcoord 
+# e.g. zcoords <- rep(0,nrow(albatross1))
+
+# Now we will make the call to match up satellite data with the trackdata. Caution this can take several minutes to hours depending on the number of locations in your tracking dataset.
+locs_chl <- rerddapXtracto::rxtracto(dataInfo, 
+                                      parameter = dataInfo$variable$variable_name, #chlorophyll
+                                      xcoord=albatross1$location_long, 
+                                      ycoord=albatross1$location_lat,
+                                      zcoord=rep(0,nrow(albatross1)), #set z coordinate to 0
+                                      tcoord=as.Date(albatross1$timestamp), #must be in YYYY-MM-DD format
+                                      xlen=0.1, ylen=0.1) #the search "radius" in the x and y directions, in degrees
+
+# After it has completed the extraction the data.frame ‘locs_chl’ will contain as many 
+# datapoints as the location data and will have 11 columns: 
+#
+# mean =              mean of data within search radius
+# stdev =             standard deviation of data within search radius
+# n =                 number of points found within search radius
+# satellite date =    time of returned value
+# requested lon min = min longitude of call (decimal degrees)
+# requested lon max = max longitude of call (decimal degrees)
+# requested lat min = min latitude of call (decimal degrees)
+# requested lat max = max latitude of call (decimal degrees)
+# requested date =    requested time in tag
+# median =            median of data within search radius
+# mad =               median absolute deviation of data within search radius
+
+#Add extracted variable into tracking dataframe
+albatross1$chl <- locs_chl$`mean chlorophyll`
+
+ggplot(albatross1) + 
+  geom_point(aes(location_long, location_lat, color=chl)) + 
+  theme_bw()
+```
+
+Another feature of Xtractomatic is extracting environmental data within a pre-defined spatial boundary and time period, from which we can make time series. As an example, let's extract the 8-day chlorophyll values within the extent of our albatross data.
+```{r xtracto box, message=F, warning=FALSE}
+# Set spatial and temporal ranges
+(xbounds<-c(min(albatross1$location_long), max(albatross1$location_long)))
+(ybounds<-c(min(albatross1$location_lat), max(albatross1$location_lat)))
+(timerange <- c(min(as.Date(albatross1$timestamp)), max(as.Date(albatross1$timestamp))))
+
+#Extract
+box_chl <- rxtracto_3D(dataInfo,
+                        parameter=dataInfo$variable$variable_name, #chlorophyll
+                        tcoord=timerange,
+                        xcoord=xbounds,
+                        ycoord=ybounds,
+                        zcoord=rep(0,nrow(albatross1)))
+
+# We can also spatially average across the data to plot a timeseries within the box
+box_chl$chl_avg <- apply(box_chl$chlorophyll, c(4) , function(x) mean(x,na.rm=TRUE))
+
+ggplot() + geom_line(aes(as.Date(box_chl$time), box_chl$chl_avg)) +
+  xlab("date") + ylab("spatially averaged chlorophyll")
+```
+
+Check out the [Xtractomatic vignette](https://cran.r-project.org/web/packages/rerddapXtracto/vignettes/UsingrerddapXtracto.html) for more examples.
+
+### A final note: Movebank annotation
+For more environmental datasets, [Movebank.org](https://www.movebank.org) has an annotation service called [Env-DATA](https://www.movebank.org/node/6607) where you can upload your movement data privately and have a variety of environmental datasets time-matched to it directly. It usually takes 1-2 days for the service to complete. This is useful for annotating your tracking data, but you cannot download the environmental datasets from here directly (for example for raster calculation or plotting purposes). 

@@ -1,0 +1,241 @@
+---
+title: "Behavioral Segmentation"
+output: html_document
+author: "Briana Abrahms"
+date: "September 10th 2019"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = '~/Dropbox/Research/R Tutorial Scripts & Workshops/Abrahms UW Movement Analysis Workshop/Workshop Materials/')
+```
+
+Behavioral analysis has become one of the most important advancements in the movement ecology literature. Due to the importance of the internal state in individual movement decisions, analyses such as these offer an opportunity to understand the motivations underlying space-use more clearly than most of the broader scale analyses we've seen thus far. We are going to begin by a simple example of First Passage Time (FPT), then consider more complex methods such as Hidden Markov Models (HMM) and Behavioral Change Point Analysis (BCPA).
+
+```{r libraries, message=FALSE}
+library(tidyverse)
+library(adehabitatLT)
+library(sf)
+library(moveHMM)
+library(bcpa)
+```
+
+```{r albatross data, message=FALSE}
+#load albatross data
+albatross <- read_tsv("data_files/Study2911040", comment="##", col_types = "Tnncc") %>%
+  as.data.frame() %>%
+  na.omit()
+
+#add UTM coordinates
+coords <- sp::SpatialPoints(data.frame(albatross$location_long, albatross$location_lat), proj4string=CRS("+proj=longlat +ellps=WGS84")) 
+UTM_coords <- spTransform(coords, CRS("+proj=utm +south +zone=16 +ellps=WGS84")) # reproject to UTM (meters)
+albatross$utm_long <- UTM_coords@coords[,1]
+albatross$utm_lat <- UTM_coords@coords[,2]
+```
+
+
+# First Passage Time (FPT)
+
+First passage time (FPT) measures the length of time an animal spends within an circle of a given
+radius and is commonly used as a proxy for area-restricted search behavior (Fauchald &
+Tveraa 2003). We first calculate the FPTs for a range of radii, and plot the variance in FPT vs. radius 
+to identify a 'characteristic scale' of restricted search behaviour where the variance is maximized. FPT is
+easily calculate in the `adehabitatLT` package, so first we need to convert our data into an `ltraj` object.
+Let's start with an FPT analysis on our Galapagos Albratoss tracking data.
+
+```{r fpt, message=F}
+# create 'ltraj' object
+alba_ltraj  <- as.ltraj(xy=cbind(albatross$utm_long, albatross$utm_lat),
+                        date=albatross$timestamp,
+                        id=as.factor(albatross$individual_id),
+                        proj4string = CRS("+proj=utm +south +zone=16 +ellps=WGS84"))
+
+# Calculate fpt in hours for one individual (#2911074) in radii of 0-400 km in 10-km increments
+albatross_fpt <- fpt(alba_ltraj[10], radii = seq(0, 400000, 10000), units="hours")
+
+# Calculate the variance for log(FPT) for radii and find the peak radius
+fpt_var<-varlogfpt(albatross_fpt) 
+```
+
+There appears to be a peak at very small spatial scales (1 km) and a secondary peak at large spatial scales (about 120 km). Let's investigate the behavioral patterns at large spatial scales.
+```{r plot fpt, message=F}
+# plot fpt over time
+plot(albatross_fpt, scale=120000, xlab=c("date")) #scale = radius to plot at
+
+# add fpt at characteristic scale to tracking data
+albatross10 <- albatross %>% filter(individual_id=="2911074")
+albatross10$fpt <- albatross_fpt[[1]]$r12
+
+# plot track by fpt
+ggplot(albatross10) +
+  geom_point(aes(x=location_long, y=location_lat, color=fpt)) + 
+  scale_color_gradientn(colors=rev(topo.colors(10))) +
+  theme_bw()
+```
+
+Here we can pick out based on FPT high-use areas around the albatross's breeding area on the Galapagos Islands to the East, and foraging areas during the non-breeding season off of mainland South America to the East.
+
+
+# Hidden Markov Models (HMM)
+Let's now fit a Hidden Markov Model to the same albatross track. Note that we can fit these models at once for all individuals in the population, but to make our demonstration run faster we will just use the one individual. The first step in the model building procedure is using the `moveHMM::prepData` command. We will specify our data, the type of projection (in our case 'LL' for latlong coordinates), and the names of the columns representing our coordinates (location_long and location_lat):
+
+```{r moveHMM data, message=FALSE}
+data <- prepData(albatross10, type="LL", coordNames=c("location_long","location_lat"))
+head(data)
+```
+
+Now we have an object (`data`) with three new variables: 'ID', 'step' (step length in coordinate units) and 'angle' (in radians; i.e., ranging from -pi to pi). We can also visualize the path and step length and angle distributions using the plot command. This will also give us time series plots of the step length and turning angle. 
+
+```{r plot HMM track, message=F}
+plot(data)
+```
+
+Now it is time to fit an HMM to the data. To do this, we will use the `moveHMM::fitHMM` command. This is a pretty complex function, however, that requires quite a few inputs to make it run smoothly. Ultimately, our goal is to build a two-state model that relates the behavioral state to the turn angle and step lengh distributions.
+
+Unless you have ancillary behavioral information (e.g. dive depth, accelerometry, etc.) it is best practice to start with `nbStates=2` which specifies that we want to fit a two-state model to the data. Then we will offer a formula to guide the calculation of the function regarding transitions between states. A `formula=~1` indicates no covariate effect. If we had a covariate, like chlorophyll or NDVI, we would use `formula=~chlorophyll`. Next we want to define the distrbutions that we want to use to characterize both the step lengths and turning angles. We are going to use a gamma distribution for the former (`stepDist="gamma"`) and a vonMises distribution for the latter (`angleDist="vm"`). That takes care of that, but we're still not ready to run our function just yet. We want to define some initial values for the state-dependent functions so that the optimization algorithm has a starting point. In this case, the initial parameters should be specified in two vectors, `stepPar0` (for the step distribution) and `anglePar0` (for the angle distribution). The exact parameters needed for each can be found in the documentation, but for a gamma distribution, we will need a mean, SD, and zero-mass (the latter only if there a step lengths equal to 0) and for the vonMises, we will need a mean and concentration parameter. [This vignette](https://cran.r-project.org/web/packages/moveHMM/vignettes/moveHMM-starting-values.pdf) has a nice explanation for choosing starting parameters, but a good place to start is looking at the empirical step length and angle distributions.
+
+```{r set HMM start parameters, message=F}
+mu0 <- c(20,40) # step mean (two parameters: one for each state)
+sigma0 <- c(20,5) # step SD (two parameters: one for each state)
+(stepPar0 <- c(mu0,sigma0))
+
+angleMean0 <- c((pi/6),0) # angle mean 
+kappa0 <- c(1,1) # angle concentration (two parameters: one for each state)
+(anglePar0 <- c(angleMean0,kappa0))
+```
+
+Now we can fit our model with the `moveHMM::fitHMM` command:
+
+```{r fitHMM, message=F}
+m <- fitHMM(data=data, nbStates=2, stepPar0=stepPar0, anglePar0=anglePar0, formula=~1, verbose=T)
+```
+
+Fortunately, that doesn't take too long even though there are some pretty intense calcualtions going on in the background. This is primarily because we are fitting relatively few data points (only 1326 in total). We can take a look at the resulting model `m`:
+
+```{r model, message=F}
+print(m)
+```
+
+This output has all sorts of interesting information for us. The first thing we can see is a log-likelihood value. Good to know, but not especially meaningful by itself. Next, we have the step length parameters. The model has explored parameter space for the mean and SD parameters and returned optimal values of each for both of our behavioral states. We can see right off the bat that the mean step size of State 1 is quite a bit smaller than that of State 2, so we have some idea about what kind of activities may be occuring in each. We may have something like Area Restricted Search (ARS) during State 1 and more directional movement during State 2. The next section defines the turning angle parameter estimates. Next, we can see the regression coefficients for the simple formula we set up to calculate state transition probabilities. 
+
+We can also use the `moveHMM::plot` command to visualize all of these things, beginning with the distributions of step lengths and turning angles in the two states, illustrating the transition proababilities between states, and then showing each of the four paths with each point assigned to the most likely state. 
+
+```{r plot HMM model, message=F}
+plot(m)
+```
+
+We've officially built our first hidden Markov model! Let's see some ways that we can use the model outputs. The first is to 'decode' the behavioral states along the paths. This was done for us when we plotted each track above, but if we wanted to see the most likley states for each point, we could use the `moveHMM::viterbi` command, which uses the Viterbi algorithm to predict the most likely sequence of states that generated these paths. From this, we can determine the proportion of time that the albatross spent in one state versus the other:
+
+```{r HMM states}
+states <- viterbi(m)
+prop.table(table(states))
+```
+
+It turns out that this animal was in the ARS state (State 1) nearly six times as frequently as they were in the directional movement state.
+
+If we wanted to get a little bit more information of the probabilities of the animal being in a particular state at a given time, we could use the `moveHMM::stateProbs` command on our model. In this case, rather than extracting one most likely state for each point, the actual probabilities of both states are displayed for each point.
+```{r}
+state.probs <- stateProbs(m)
+head(state.probs)
+```
+
+We can also visualize these probabiities using `moveHMM::plotStates`:
+
+```{r}
+plotStates(m)
+```
+
+Now let's see how our model performs with an ancillary variable like fpt. Then, we can use the `moveHMM::AIC` command to compare the likelihood values (or more accurately, the information criterion values derived from the liklihoods) and determine which model performed better.
+
+```{r}
+m2 <- fitHMM(data=data, nbStates=2, stepPar0=stepPar0, anglePar0=anglePar0, formula=~fpt, verbose=T)
+  
+AIC(m, m2)
+```
+
+The lower AIC value for m2 indicates that we got additional information that was more beneficial than the additional cost of adding a another parameter. Now we can take a look at our more accurate model:
+
+```{r}
+plot(m2)
+```
+
+Finally, we can see how FPT influences the probability of being in State 1 or State 2:
+```{r FPT states, message=F}
+plotStationary(m2, plotCI=TRUE)
+```
+
+As we'd expect, the model predicts a higher probability of being in State 1 (putative ARS/foraging) when First Passage Time is high. We could do this analysis for any other covariate we had on hand as well.
+
+
+# Behavioral Change Point Analysis (BCPA)
+
+The next method we're going to take a look at is the behavioral change point analysis (BCPA), which looks for the points in a time series during which there are notable shifts. In our case, we will be applying the method to a movement trajectory to see where an animal may transition between behavioral states, but technically change point analyses can be performed on any time series data (e.g., fluctuating stock values over time or carbon dioxide concentration in the atmosphere over time).
+
+Just as with all other packages, `bcpa` has its own data format that it prefers, so we will use the `bcpa::MakeTrack` command to translate our coordinates into a usable format:
+
+```{r bpca data}
+alba_bpca <- bcpa::MakeTrack(albatross10$location_long,albatross10$location_lat,albatross10$timestamp)
+plot(alba_bpca)
+```
+
+To obtain the step length and turning angles, use the `bcpa::GetVT` command, which decomposes the data into single steps and calculates all the statistics:
+
+```{r bcpa stats, message=F}
+albatross.VT <- GetVT(alba_bpca)
+head(albatross.VT)
+```
+
+The essence of a change point analysis is a sweep across a time series in search of breaks. This sweep can be conducted in a number of ways, but we will focus here on the window sweep, whereby we identify an appropriate `windowsize` and sensitivity (`K`) and then the algorithm searches across the time series in search of break points. One can also input a function as the second argument (it can represent any combination of the elements of our `albatross.VT` dataframe), to serve as a response variable. In this case, we will define a very simple function persistence of movement in a given direction (i.e. 'persistence velocity') because we dont really have any *a priori* conception of what exactly causes change points in this path.
+
+```{r bcpa window sweep, message=F}
+albatross.ws <- WindowSweep(albatross.VT, "V*cos(Theta)", windowsize=100, progress=FALSE, K=2) #takes 30 or so seconds
+```
+
+The object that is returned by this function (which takes a little while to run, hence our reduction of the dataset to a smaller length) is a `ws` data frame whose final column indicates proposed break points should be and the parameter values associated with before and after those break point. Here 'mu', 's', and 'rho' are the estimated mean, standard deviation, and autocorrelation of our response variable (velocity persistence).
+
+```{r}
+head(albatross.ws$ws)
+```
+
+We can take a look at these suggested breakpoints by looking at the smoothed plot (i.e., the summary in which all the windows are averaged to obtain the “smooth” model). In this plot, the vertical lines represent the significant change points, the width of the lines is proportional to the number of time that change point was selected.
+
+```{r, warning=FALSE}
+plot(albatross.ws, type="smooth", mu.where="topright")
+```
+
+That doesn't offer the clearest picture. We can see that there are many change points that have some support. We could, however, add a `threshold` parameter, which indicates how many of the windows that were swept over the data must have selected a particular changepoint for it to be considered significant. Here, we will use 20 and see what it looks like:
+
+```{r, warning=FALSE}
+plot(albatross.ws, type="smooth", threshold=20, mu.where="topright")
+```
+
+This reduces our number of change points down to a more reasonable 8, and all of them appear to signify reasonable shifts in our response variable (which combines velocity and angle).
+
+An alternative way to search for change points is to use the 'flat' rather than 'smooth' method. This analysis first selects changepoints that it deems significant by clustering neighboring change points, and then estimates a homogeneous behavior that occurs between those changepoints.
+
+```{r, warning=FALSE}
+plot(albatross.ws, type="flat", mu.where="topright")
+```
+
+Once again, if we don't set an equivalent to the threshold parameter (in the case of the 'flat' approach, its called `clusterwidth`), we get quite a few change points. If we set this parameter to 20, we get the following:
+
+```{r, warning=FALSE}
+plot(albatross.ws, type="flat", clusterwidth=20, mu.where="topright")
+```
+
+This fairly conservative approach results in 19 significant change points in our time series. A summary of these change points can be obtained using the `bcpa::ChangePointSummary` command. Here 'mu.hat', 's.hat', and 'rho.hat' are the estimated mean, standard deviation, and autocorrelation of our response variable in each phase.
+
+```{r change point summary, message=F}
+summary <- ChangePointSummary(albatross.ws, clusterwidth=20)
+head(summary$phases)
+```
+
+This summmary suggests eight phases. We can also visualize the path itself with the associated change points using the `bcpa::PathPlot` command or the `bcpa::PhasePlot` command:
+
+```{r Pathplots, message=F}
+par(mfrow=c(1,2))
+PathPlot(alba_bpca, albatross.ws, type="flat", clusterwidth = 20, main="Flat BCPA", plotlegend=TRUE)
+PathPlot(alba_bpca, albatross.ws, type="smooth", main="Smooth BCPA", plotlegend=TRUE)
+```
+
+We see similar patterns as in our previous methods, with periods of high direction persistence during transiting between breeding/foraging areas.
